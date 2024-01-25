@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Check if the required arguments are provided
-if [ $# -ne 2 ]; then
+if [ $# -lt 2 ]; then
     echo "Error: Two arguments are required."
     exit 1
 fi
