@@ -86,17 +86,22 @@ mkdir -p bin dev stc home lib lib64 proc sbin sys tmp usr var
 mkdir -p usr/bin usr/lib usr/sbin
 mkdir -p var/log
 
-sudo cp -a "${sroot}/lib/ld-linux-aarch64.so.1" lib64
-sudo cp -a "${sroot}/lib/ld-linux-aarch64.so.1" lib
+# sudo cp -a "${sroot}/lib/ld-linux-aarch64.so.1" lib64
+# sudo cp -a "${sroot}/lib/ld-linux-aarch64.so.1" lib
 
-sudo cp -a "${sroot}/lib64/libm.so.6" lib64
-sudo cp -a "${sroot}/lib64/libresolv.so.2" lib64
-sudo cp -a "${sroot}/lib64/libc.so.6" lib64
+# sudo cp -a "${sroot}/lib64/libm.so.6" lib64
+# sudo cp -a "${sroot}/lib64/libresolv.so.2" lib64
+# sudo cp -a "${sroot}/lib64/libc.so.6" lib64
 
-sudo cp -a "${sroot}/lib64/ld-2.31.so" lib64
-sudo cp -a "${sroot}/lib64/libm-2.31.so" lib64
-sudo cp -a "${sroot}/lib64/libresolv-2.31.so" lib64
-sudo cp -a "${sroot}/lib64/libc-2.31.so" lib64
+# sudo cp -a "${sroot}/lib64/ld-2.31.so" lib64
+# sudo cp -a "${sroot}/lib64/libm-2.31.so" lib64
+# sudo cp -a "${sroot}/lib64/libresolv-2.31.so" lib64
+# sudo cp -a "${sroot}/lib64/libc-2.31.so" lib64
+
+cp `aarch64-none-linux-gnu-gcc -print-sysroot`/lib64/libc.so.6 ./lib64
+cp `aarch64-none-linux-gnu-gcc -print-sysroot`/lib64/libm.so.6 ./lib64
+cp `aarch64-none-linux-gnu-gcc -print-sysroot`/lib64/libresolv.so.2 ./lib64
+cp `aarch64-none-linux-gnu-gcc -print-sysroot`/lib/ld-linux-aarch64.so.1 ./lib
 
 
 # TODO: Make device nodes
@@ -107,8 +112,8 @@ sudo mknod -m 600 dev/console c 5 1
 
 # TODO: Clean and build the writer utility
 cd ${FINDER_APP_DIR}
-make clean
-make CROSS_COMPILE=${CROSS_COMPILE}
+make CROSS_COMPILE=${CROSS_COMPILE} clean
+make CROSS_COMPILE=${CROSS_COMPILE} all 
 
 # TODO: Copy the finder related scripts and executables to the /home directory
 # on the target rootfs
@@ -125,13 +130,15 @@ cp -a "${FINDER_APP_DIR}/conf/username.txt" "${OUTDIR}/rootfs/home/conf"
 
 
 # TODO: Chown the root directory
-cd "${OUTDIR}/rootfs"
-
-sudo chown -R root:root *
+# cd "${OUTDIR}/rootfs"
+# sudo chown -R root:root *
+sudo chown root:root ${OUTDIR}/rootfs
+sudo chown root:root -R ${OUTDIR}/rootfs/*
 
 
 # TODO: Create initramfs.cpio.gz
-find . | cpio -H newc -ov --owner root:root > ${OUTDIR}/initramfs.cpio
+cd "${OUTDIR}/rootfs"
 
-cd ${OUTDIR}
-gzip -f initramfs.cpio
+sudo find . | cpio -H newc -ov --owner root:root > ${OUTDIR}/initramfs.cpio
+
+gzip -f ${OUTDIR}/initramfs.cpio
