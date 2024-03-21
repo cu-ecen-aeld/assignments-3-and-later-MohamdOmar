@@ -1,232 +1,327 @@
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netdb.h>
+#define __USE_POSIX
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <syslog.h>
 #include <signal.h>
-#include <stdio.h>
-#include <stdint.h>
-#include <errno.h>
-#include <string.h>
-#include <stdbool.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <fcntl.h>
-#include <sys/stat.h>
 #include <unistd.h>
-#include <signal.h>
-#include <stdlib.h>
-bool accept_connection = true;
-extern int errno;
-#define BACKLOG 20
-#define BUFF_SIZE 512
-const char *log_path = "/var/tmp/aesdsocketdata";
-int caught_signal;
-int sockfd;
-void signal_handler(int sig_num)
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/ip.h> 
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <stdbool.h>
+
+#define SERVER_PORT "9000"
+#define FILENAME "/var/tmp/aesdsocketdata"
+
+
+/* Global variables */
+static FILE* output_file;
+static char* internal_buffer;
+struct sigaction sig_action;
+
+int sockfd, newsockfd;
+
+/* Function prototypes */
+static void my_handler (int signo, siginfo_t *si, void *ucontext);
+static int appendData(char* data, size_t size, FILE* file);
+static void initSignalHandler(void);
+static int socketHandler(int socket, FILE* file);
+static int startServer(bool runasdaemon);
+static void *get_in_addr(struct sockaddr *sa);
+static void sendFile(int socket, FILE* file);
+/**
+ *  Main function
+*/
+int main(int argc, char** argv)
 {
-    int status;
-    syslog(LOG_USER, "Closing Signal : %s\n", strsignal(caught_signal));
-    status = close(sockfd);
-    if (status != 0)
+    int retval = 0;
+    bool daemon = false;
+    for(int i=1; i < argc; ++i)
     {
-        syslog(LOG_ERR, "Failed to close socket");
+        if(strstr(argv[i],"-d"))
+        {
+            daemon = true;
+        }
     }
-    closelog();
-    remove(log_path);
-    exit(EXIT_SUCCESS);
-}
-// reference : https://beej.us/guide/bgnet/html/
-void *get_in_addr(struct sockaddr *sa)
-{
-    if (sa->sa_family == AF_INET)
+    openlog("aesdsockets", LOG_CONS | LOG_PID, LOG_USER);
+    
+    /* Open output file */
+    output_file = fopen(FILENAME, "a+");
+    if(output_file == NULL)
     {
-        return &(((struct sockaddr_in *)sa)->sin_addr);
+        syslog(LOG_ERR, "Could not open/create file, exiting");
+        return -1;
     }
 
-    return &(((struct sockaddr_in6 *)sa)->sin6_addr);
+    /* Install signal handler */
+    initSignalHandler();
+
+
+    /* Open socket */
+    sockfd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if(sockfd == -1)
+    {
+        syslog(LOG_ERR, "Could not create socket");
+        return -1;
+    }
+
+    startServer(daemon);
+
+    return 0;
 }
-int main(int argc, char *argv[])
+
+int startServer(bool runasdaemon)
 {
-    struct sockaddr_storage client_address;
-    const char *ident = "AESD-SOCKET";
-    openlog(ident, LOG_PID, LOG_USER);
-    struct addrinfo hints;
-    int status;
-    struct addrinfo *res;
+    struct addrinfo hints, *servinfo, *p;
+    int yes=1;
+    char s[INET6_ADDRSTRLEN];
+    int rv;
+    socklen_t sin_size;
+    struct sockaddr_storage their_addr;
 
-    signal(SIGTERM, signal_handler);
-    signal(SIGINT, signal_handler);
-
+    memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC;
-    hints.ai_flags = AI_PASSIVE;
     hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = 0;
+    hints.ai_flags = AI_PASSIVE; // use my IP
 
-    status = getaddrinfo(NULL, "9000", &hints, &res);
-    if (status != 0)
-    {
-        syslog(LOG_ERR, "getaddrinfo() error: %s\n", gai_strerror(status));
-        return -1;
-    }
-    sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (sockfd == -1)
-    {
-        return -1;
-    }
-    int optval = 1;
-    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-
-    status = bind(sockfd, res->ai_addr, res->ai_addrlen);
-    if (status != 0)
-    {
-        syslog(LOG_ERR, "bind() error: %s\n", strerror(errno));
-        freeaddrinfo(res);
-        return -1;
-    }
-    //We don't require res after this. Close this connection.
-    freeaddrinfo(res);
-
-
-    if (argc > 1)
-    {
-        if (!strcmp(argv[1], "-d"))
-        {
-            pid_t child_pid = fork();
-            if (child_pid == -1)
-            {
-                syslog(LOG_ERR, "Error creating Daemon\n");
-                close(sockfd);
-                closelog();
-                exit(EXIT_FAILURE);
-            }
-            else if (child_pid > 0)
-            {
-                exit(EXIT_SUCCESS);
-            }
-            else
-            {
-                // This is the child. Convert this to a daemon.
-                if (setsid() == -1)
-                {
-                    syslog(LOG_ERR, "Error creating new session");
-                    close(sockfd);
-                    closelog();
-                    exit(EXIT_FAILURE);
-                }
-                chdir("/");
-
-                // Taken from Linux System Programming - Robert Love
-                /* redirect fd's 0,1,2 to /dev/null */
-                open("/dev/null", O_RDWR);
-                /* stdin */
-                dup(0);
-                /* stdout */
-                dup(0);
-                /* stderror */
-            }
-        }
-    }
-    status = listen(sockfd, BACKLOG);
-    if (status != 0)
-    {
-        syslog(LOG_ERR, "listen() error: %s\n", strerror(errno));
+    if ((rv = getaddrinfo(NULL, SERVER_PORT, &hints, &servinfo)) != 0) {
+        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
+        exit (-11);
     }
 
-    socklen_t client_address_size = sizeof(client_address);
-    while (true) // run infinitely until and error occurs or terminated by sigint.
-    {
-        int cfd = accept(sockfd, (struct sockaddr *)&client_address, &client_address_size);
-
-        if (cfd == -1)
-        {
-            syslog(LOG_ERR, "accept() error : %s\n", strerror(errno));
+    // loop through all the results and bind to the first we can
+    for(p = servinfo; p != NULL; p = p->ai_next) {
+        if ((sockfd = socket(p->ai_family, p->ai_socktype,
+                p->ai_protocol)) == -1) {
+            perror("server: socket");
+            continue;
         }
 
+        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes,
+                sizeof(int)) == -1) {
+            perror("setsockopt");
+            exit(-1);
+        }
+
+        if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+            close(sockfd);
+            perror("server: bind");
+            continue;
+        }
+
+        break;
+    }
+
+    freeaddrinfo(servinfo); // all done with this structure
+
+    if (p == NULL)  {
+        fprintf(stderr, "server: failed to bind\n");
+        exit(-1);
+    }
+
+
+    if(runasdaemon)
+    {
+        if(daemon(0, 1) == -1)
+        {
+            printf("Couldnt daemonize");
+            exit(-1);
+        }
+    }
+
+
+
+    if (listen(sockfd, 1) == -1) {
+        perror("listen");
+        exit(-1);
+    }
+
+    while(1) {  // main accept() loop
+        sin_size = sizeof their_addr;
+        newsockfd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
+        if (newsockfd == -1) {
+            perror("accept");
+            continue;
+        }
+
+        inet_ntop(their_addr.ss_family,
+            get_in_addr((struct sockaddr *)&their_addr),
+            s, sizeof s);
+        
+        syslog(LOG_USER, "Accepted connection from %s", s);
+
+        socketHandler(newsockfd, output_file);
+        
+        syslog(LOG_USER, "Closed connection from %s", s);
+    }
+
+}
+
+int socketHandler(int socket, FILE* file)
+{
+//    struct sockaddr client_address;
+//    socklen_t len; 
+//    char ipaddr[16];
+//    /* Print peer address to log */
+//    if(getpeername(socket, &client_address, &len))
+//    {
+//        syslog(LOG_ERR, "Could not obtain peer address");
+//        exit(-1);
+//    }
+//
+//    inet_ntop(AF_INET, &client_address, ipaddr , sizeof ipaddr);
+//    syslog(LOG_DEBUG, "Accepted connection from %s",ipaddr );
+
+    ssize_t received;
+    uint8_t buff[1501];
+    do
+    {
+        received = read(newsockfd, buff, 1500);
+        appendData(buff, received, output_file);
+        //send(newsockfd, buff, received,0);
+    }while (received>0);
+
+    return 0;
+}
+
+
+/**
+ *  Signal handler
+*/
+void signalHandler (int signo)
+{
+    syslog(LOG_USER, "Caught signal, exiting");
+
+    closelog();
+
+    close(sockfd);
+    close(newsockfd);
+
+    fclose(output_file);
+    remove(FILENAME);
+
+    free(internal_buffer);
+
+    exit(0);
+}
+
+/**
+ *  Appends data to buffer
+ *  Writes buffer when a line is complete
+*/
+int appendData(char* data, size_t size, FILE* file)
+{
+    static size_t currentSize = 0;
+    
+    if(internal_buffer == NULL) /* New line */
+    {
+        internal_buffer = malloc(size * sizeof(char));
+        if(internal_buffer == NULL)
+        {
+            syslog(LOG_CRIT, "Cannot allocate memory for new write");
+            return -1;
+        }
+        currentSize = size;
+        memcpy(internal_buffer, data, size);
+    }
+    else    /* Continue with line */
+    {
+        char* new_buffer = realloc(internal_buffer, currentSize + size);
+        if(new_buffer == NULL)
+        {
+            syslog(LOG_CRIT, "Cannot allocate memory for new write, flushing buffer");
+            
+            if(fwrite(internal_buffer, sizeof(char), currentSize, file) <= 0)
+            {
+                syslog(LOG_CRIT, "Cannot write to file");
+                return -1;
+            }
+            fflush(file);
+            free(internal_buffer);
+            currentSize = 0;
+            return appendData(data, size, file);
+        }
         else
         {
-            char peer_ip[INET6_ADDRSTRLEN];
-            char rec_buff[BUFF_SIZE];
-            rec_buff[BUFF_SIZE - 1] = 0; // Make the buffer null terminated for strchr to work correctly.
-
-            inet_ntop(client_address.ss_family, get_in_addr((struct sockaddr *)&client_address), peer_ip, INET6_ADDRSTRLEN);
-            syslog(LOG_USER, "Accepted conncetion from : %s\n", peer_ip);
+            memcpy(new_buffer + currentSize, data, size);
+            internal_buffer = new_buffer;
+            currentSize += size;
             
-            int log_fd = open(log_path, O_CREAT | O_APPEND | O_RDWR, S_IRWXU | S_IRGRP | S_IROTH);
-            int num_read_bytes = 0;
-            int num_write_bytes = 0;
-            
-            if (log_fd == -1)
-            {
-                syslog(LOG_ERR, "open() error for log file : %s\n", strerror(errno));
-                close(cfd);
-                break;
-            }
-            else
-            {
-                bool packet_complete = false;
-                while (!packet_complete)
-                {
-                    num_read_bytes = recv(cfd, rec_buff, BUFF_SIZE - 1, 0);
-                    if (num_read_bytes == -1)
-                    {
-                        syslog(LOG_ERR, "recv() error : %s\n", strerror(errno));
-                        close(cfd);
-                        break;
-                    }
-                    else if (num_read_bytes == 0 || (strchr(rec_buff, '\n') != NULL))
-                    {
-                        packet_complete = true;
-                    }
-                    num_write_bytes = write(log_fd, rec_buff, num_read_bytes);
-                    if (num_write_bytes != num_read_bytes)
-                    {
-                        syslog(LOG_ERR, "write() failed error : %s\n", strerror(errno));
-                        close(cfd);
-                        break;
-                    }
-                }
-                // reinitialize bool before starting send()
-                packet_complete = false;
-                lseek(log_fd, 0, SEEK_SET); // Reset the cursor to the origin before reading.
-                while (!packet_complete)
-                {
-                    num_read_bytes = read(log_fd, rec_buff, BUFF_SIZE);
-                    if (num_read_bytes < BUFF_SIZE)
-                    {
-                        packet_complete = true;
-                    }
-                    num_write_bytes = send(cfd, rec_buff, num_read_bytes, 0);
-                    if (num_write_bytes != num_read_bytes)
-                    {
-                        syslog(LOG_ERR, "send() error : %s\n", strerror(errno));
-                        close(cfd);
-                        break;
-                    }
-                }
-
-
-                close(log_fd);
-                status = close(cfd);
-                if (status != 0)
-                {
-                    syslog(LOG_ERR, "close() error on cfd : %s\n", strerror(errno));
-                    break;
-                }
-                else
-                {
-                    syslog(LOG_USER, "Closed connection from %s", peer_ip);
-                }
-            }
         }
     }
 
-    // exited due to some error on cfd. 
-    status = close(sockfd);
-    if (status != 0)
+    /* Look for end of line character */
+    size_t i = 0ULL;
+    
+    for(i=0ULL; i < currentSize; ++i)
     {
-        syslog(LOG_ERR, "Failed to close socket");
+        if(internal_buffer[i] == '\n')
+        {
+            fwrite(internal_buffer, sizeof(char), i+1, file);
+            fflush(file);
+            printf("Sending back file");
+            sendFile(newsockfd, file);
+            if((i+1) < currentSize)
+                memmove(internal_buffer, internal_buffer + i + 1, currentSize - i);
+            currentSize -= (i+1);
+        }
     }
-    closelog();
-    remove(log_path);
-    return -1; // if it exited the while loop it did so beacuse of a connection error.
+
+    if(currentSize == 0)
+    {
+        free(internal_buffer);
+        internal_buffer = NULL;
+    }
+    else
+    {
+        /* Shrink the buffer */
+        internal_buffer = realloc(internal_buffer, currentSize);
+    }
+
+    return 0;
+}
+
+
+void sendFile(int socket, FILE* file)
+{
+    char buff[1024];
+    size_t count;
+    rewind(file);
+    do
+    {
+        count = fread(buff, sizeof(char), sizeof(buff)/sizeof(char), file);
+        
+        if(count)
+        {
+            send(socket, buff, count, 0);
+            printf("sending %lu bytes\n", count);
+        }
+    } while (count);
+}
+/**
+ *  Initializes signal handling
+*/
+void initSignalHandler(void)
+{
+    sig_action.sa_handler = signalHandler;
+
+    /* Block all signals */
+    memset (&sig_action.sa_mask, 1, sizeof(sig_action.sa_mask));
+
+    sigaction(SIGINT, &sig_action, NULL);
+    sigaction(SIGTERM, &sig_action, NULL);
+
+}
+
+// get sockaddr, IPv4 or IPv6:
+void *get_in_addr(struct sockaddr *sa)
+{
+    if (sa->sa_family == AF_INET) {
+        return &(((struct sockaddr_in*)sa)->sin_addr);
+    }
+
+    return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
